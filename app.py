@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
 
     # TODO: in Next Steps, connect to redis here
 
-    app.state.batch_queue = asyncio.Queue()
+    app.state.batch_queue = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
 
     # Start the batch processor
     app.state.batch_processor_task = asyncio.create_task(batch_processor(app))
@@ -74,6 +74,8 @@ app = FastAPI(title="ML Prediction Service", lifespan=lifespan)
 
 # Batch processing variables
 batch_size = 32  # Maximum batch size for inference
+MAX_QUEUE_SIZE = 10_000
+# MAX_QUEUE_SIZE = 10
 
 # Define data models
 class Feature(BaseModel):
@@ -96,6 +98,7 @@ class Stats(BaseModel):
     avg_latency: float
     batch_count: int
     avg_batch_size: float
+    queue_size: int
     median_of_medians: Optional[float] = None
 
 # Function to run inference on a single sample
@@ -239,10 +242,16 @@ def calculate_median_of_medians(app):
 async def ingest_events(request: Request, event_batch: EventBatch, background_tasks: BackgroundTasks):
     stats = request.app.state.stats
     stats["request_count"] += 1
+
+    batch_queue = request.app.state.batch_queue
+    if batch_queue.maxsize > 0:
+        remaining_capacity = batch_queue.maxsize - batch_queue.qsize()
+        if len(event_batch.events) > remaining_capacity:
+            raise HTTPException(status_code=429, detail="Queue is full")
     
     # Add events to the batch queue
     for event in event_batch.events:
-        await request.app.state.batch_queue.put({
+        await batch_queue.put({
             "user_id": event.user_id,
             "timestamp": event.timestamp,
             "features": event.features
@@ -285,6 +294,10 @@ async def get_history(user_id: str, request: Request):
 async def get_stats(request: Request):
     stats = request.app.state.stats
     stats["request_count"] += 1
+
+    queue_size = 0
+    if hasattr(request.app.state, "batch_queue"):
+        queue_size = request.app.state.batch_queue.qsize()
     
     return Stats(
         request_count=stats["request_count"], # is this needed?
@@ -292,6 +305,7 @@ async def get_stats(request: Request):
         avg_latency=stats["avg_latency"], # is this needed?
         batch_count=stats["batch_count"], # is this needed?
         avg_batch_size=stats["avg_batch_size"], # is this needed?
+        queue_size=queue_size,
         median_of_medians=stats["median_of_medians"] # stretch goal
     )
 
