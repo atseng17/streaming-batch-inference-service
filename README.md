@@ -84,9 +84,19 @@ Check `requirements.txt` for the list of dependencies.
   curl http://localhost:8000/users/user-1/median
   ```
 
+- **GET /users/{user_id}/history**: Get the full stored history for a specific user
+  ```
+  curl http://localhost:8000/users/user-1/history
+  ```
+
 - **GET /stats**: Get service statistics
   ```
   curl http://localhost:8000/stats
+  ```
+
+- **POST /reset**: Reset in-memory stats and user rolling medians
+  ```
+  curl -X POST http://localhost:8000/reset
   ```
 
 ### Generate Events

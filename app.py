@@ -16,9 +16,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Application state
-app_state = {
-    "user_data": {},  # Dictionary to store user data and rolling medians
-    "stats": {
+def _fresh_stats():
+    return {
         "request_count": 0,
         "inference_count": 0,
         "avg_latency": 0,
@@ -28,6 +27,10 @@ app_state = {
         "total_batch_size": 0,
         "median_of_medians": None,
     }
+
+app_state = {
+    "user_data": {},  # Dictionary to store user data and rolling medians
+    "stats": _fresh_stats()
 }
 
 
@@ -251,7 +254,7 @@ async def ingest_events(request: Request, event_batch: EventBatch, background_ta
     return {"queued": len(event_batch.events)}
 
 @app.get("/users/{user_id}/median")
-async def get_median(request: Request, user_id: str):
+async def get_median(user_id: str, request: Request):
     stats = request.app.state.stats
     stats["request_count"] += 1
     
@@ -261,6 +264,22 @@ async def get_median(request: Request, user_id: str):
         raise HTTPException(status_code=404, detail=f"No data found for user {user_id}")
     
     return {"user_id": user_id, "median": median}
+
+@app.get("/users/{user_id}/history")
+async def get_history(user_id: str, request: Request):
+    stats = request.app.state.stats
+    stats["request_count"] += 1
+
+    user_data = request.app.state.user_data
+    if user_id not in user_data or not user_data[user_id]:
+        raise HTTPException(status_code=404, detail=f"No data found for user {user_id}")
+
+    history = [
+        {"timestamp": ts, "prediction": pred}
+        for ts, pred in user_data[user_id]
+    ]
+
+    return {"user_id": user_id, "history": history}
 
 @app.get("/stats")
 async def get_stats(request: Request):
@@ -275,6 +294,25 @@ async def get_stats(request: Request):
         avg_batch_size=stats["avg_batch_size"], # is this needed?
         median_of_medians=stats["median_of_medians"] # stretch goal
     )
+
+
+@app.post("/reset")
+async def reset_state(request: Request):
+    request.app.state.user_data.clear()
+
+    stats = request.app.state.stats
+    stats.clear()
+    stats.update(_fresh_stats())
+
+    if hasattr(request.app.state, "batch_queue"):
+        while True:
+            try:
+                request.app.state.batch_queue.get_nowait()
+                request.app.state.batch_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+
+    return {"status": "ok"}
 
 
 # Main function
