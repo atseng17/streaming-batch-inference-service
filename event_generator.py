@@ -21,7 +21,7 @@ def post_batch(url, batch):
         print("post error", e)
         return None
 
-def run(target_url="http://localhost:8000/ingest", rps=5000, duration_sec=5, users=10000):
+def run(target_url="http://localhost:8000/ingest", rps=5000, duration_sec=10, users=10000):
     """
     Andrew's note:
     
@@ -32,7 +32,7 @@ def run(target_url="http://localhost:8000/ingest", rps=5000, duration_sec=5, use
 
     This client will be hanging if the server is not able to keep up with the rate of events.
     So the ingest endpoint should queue up the events and return 200 immedieatly, and process them in the background or send to another service.
-    Server should return 503 if it is not able to keep up with the rate of events. (TODO)
+    Server should return 429 if it is not able to keep up with the rate of events.
     """
     batch_size = 10
     batches_per_sec = rps // batch_size
