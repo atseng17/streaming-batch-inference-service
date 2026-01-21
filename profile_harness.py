@@ -1,3 +1,6 @@
+"""
+Profiles the batch processing internals, not the /ingest endpoint's full request/validation/queueing path.
+"""
 import asyncio
 import random
 import sys
