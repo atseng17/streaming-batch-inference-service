@@ -39,7 +39,7 @@ def main() -> None:
     for i in range(n):
         t0 = time.time()
         try:
-            r = requests.get(args.url, timeout=2)
+            r = requests.get(args.url, timeout=5)
             r.raise_for_status()
             payload = r.json()
         except Exception as e:
@@ -98,14 +98,14 @@ def main() -> None:
     axes[3].set_ylabel("events/sec")
     axes[3].grid(True)
 
-    axes[4].plot(times, requests_per_sec, label="requests_per_sec")
-    axes[4].set_ylabel("req/sec")
-    axes[4].grid(True)
+    # axes[4].plot(times, requests_per_sec, label="requests_per_sec")
+    # axes[4].set_ylabel("req/sec")
+    # axes[4].grid(True)
 
-    axes[5].plot(times, median_of_medians, label="median_of_medians")
-    axes[5].set_ylabel("median_of_medians")
-    axes[5].set_xlabel("seconds")
-    axes[5].grid(True)
+    axes[4].plot(times, median_of_medians, label="median_of_medians")
+    axes[4].set_ylabel("median_of_medians")
+    axes[4].set_xlabel("seconds")
+    axes[4].grid(True)
 
     fig.tight_layout()
     fig.savefig(args.out, dpi=150)

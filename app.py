@@ -1,3 +1,14 @@
+"""
+FastAPI ingestion and processing service with an in-memory queue (implemented a "bounded" version after DL) and server-side dynamic micro-batching for inference.
+The app maintains rolling per-user aggregates, stats and backpressure via 429 when overloaded (implemented backpressure after DL).
+Endpoints:
+    - POST /ingest: Ingest a batch of events
+    - GET /users/{user_id}/median: Get the rolling median for a specific user
+    - GET /users/{user_id}/history: Get the full stored history for a specific user (for analytical purposes)
+    - GET /stats: Get service statistics
+"""
+
+
 import asyncio
 import logging
 import time
@@ -39,9 +50,9 @@ app_state = {
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager
-    1. Creates a container for saving user prediction history and stats (the History is gone after the app shuts down, improvement: redis)
-    2. Creates a in-memory queue for batch processing
-    3. Loading model, set inference mode
+    1. Loading model, set inference mode
+    2. Creates a container for saving user prediction history and stats (the History is gone after the app shuts down, improvement: redis)
+    3. Creates a in-memory queue for batch processing
     4. Start batch processor in the background
     5. gracefully stop background process
     """
@@ -81,7 +92,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="ML Prediction Service", lifespan=lifespan)
 
 # Batch processing variables
-batch_size = 32  # Maximum batch size for inference
+BATCH_SIZE = 32  # Maximum batch size for inference
 MAX_QUEUE_SIZE = 10_000
 # MAX_QUEUE_SIZE = 10
 
@@ -166,7 +177,7 @@ async def batch_processor(app):
             # batch_queue.task_done()
             
             # Try to get more items up to batch_size
-            for _ in range(batch_size - 1):
+            for _ in range(BATCH_SIZE - 1):
                 try:
                     item = batch_queue.get_nowait()
                     batch_items.append(item)
@@ -243,7 +254,7 @@ def calculate_median_of_medians(app):
     stats = app.state.stats
     # Get all user medians
     medians = []
-    for user_id in user_data:
+    for user_id in list(user_data):
         user_median = get_user_median(app, user_id)
         if user_median is not None:
             medians.append(user_median)
@@ -254,7 +265,7 @@ def calculate_median_of_medians(app):
     return None
 
 # API endpoints
-@app.post("/ingest", response_model=IngestResponse)
+@app.post("/ingest", response_model=IngestResponse, status_code=202)
 async def ingest_events(request: Request, event_batch: EventBatch, background_tasks: BackgroundTasks):
     """
     Two tasks:
@@ -282,6 +293,7 @@ async def ingest_events(request: Request, event_batch: EventBatch, background_ta
         })
     
     # Recompute on every ingest request
+    # TODO: move this to the batch processor, right after processing the batch, so the metric reflects the latest processed, also better if high rps
     background_tasks.add_task(calculate_median_of_medians, request.app)
     
     return IngestResponse(queued=len(event_batch.events))
