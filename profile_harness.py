@@ -1,3 +1,6 @@
+"""
+Profiles the batch processing internals, not the /ingest endpoint's full request/validation/queueing path.
+"""
 import asyncio
 import random
 import sys
@@ -41,7 +44,7 @@ async def main(batches: int = 5000, batch_size: int = 32, feature_dim: int = 3, 
 
         now = int(time.time())
         for i, p in enumerate(preds):
-            app.update_rolling_median(a, f"u{i % users}", now - i, p)
+            app.update_user_history(a, f"u{i % users}", now - i, p)
 
     app.calculate_median_of_medians(a)
 

@@ -84,9 +84,19 @@ Check `requirements.txt` for the list of dependencies.
   curl http://localhost:8000/users/user-1/median
   ```
 
+- **GET /users/{user_id}/history**: Get the full stored history for a specific user
+  ```
+  curl http://localhost:8000/users/user-1/history
+  ```
+
 - **GET /stats**: Get service statistics
   ```
   curl http://localhost:8000/stats
+  ```
+
+- **POST /reset**: Reset in-memory stats and user rolling medians
+  ```
+  curl -X POST http://localhost:8000/reset
   ```
 
 ### Generate Events
@@ -128,23 +138,25 @@ python -c "import pstats; p=pstats.Stats('prof.out'); p.strip_dirs().sort_stats(
 The following results are returned, showing the sorting part of the code is the bottleneck. The original purpose of sorting is to deal with out of order events.
 ```
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-        1    0.000    0.000   63.597   63.597 profile_harness.py:1(<module>)
-        1    0.126    0.126   56.944   56.944 profile_harness.py:16(main)
-   160000    0.181    0.000   56.006    0.000 app.py:188(update_rolling_median)
-400080000   20.994    0.000   20.994    0.000 app.py:200(<lambda>)
-        1    0.000    0.000    0.688    0.688 app.py:1(<module>)
-     5000    0.040    0.000    0.661    0.000 app.py:120(run_batched_inference)
-     5000    0.057    0.000    0.453    0.000 create_model.py:15(forward)
-     5000    0.041    0.000    0.127    0.000 profile_harness.py:39(<listcomp>)
-        1    0.000    0.000    0.022    0.022 app.py:219(calculate_median_of_medians)
-       32    0.000    0.000    0.022    0.001 app.py:207(get_user_median)
-       32    0.008    0.000    0.008    0.000 app.py:213(<listcomp>)
-        1    0.000    0.000    0.000    0.000 app.py:76(Feature)
-        1    0.000    0.000    0.000    0.000 app.py:81(EventBatch)
-        1    0.000    0.000    0.000    0.000 create_model.py:1(<module>)
-        1    0.000    0.000    0.000    0.000 app.py:90(Stats)
-        1    0.000    0.000    0.000    0.000 app.py:84(Prediction)
-        1    0.000    0.000    0.000    0.000 create_model.py:4(InefficientModel)
+        1    0.000    0.000   53.616   53.616 profile_harness.py:1(<module>)
+        1    0.099    0.099   51.721   51.721 profile_harness.py:16(main)
+   160000    0.154    0.000   50.929    0.000 app.py:204(update_user_history)
+400080000   19.068    0.000   19.068    0.000 app.py:222(<lambda>)
+     5000    0.033    0.000    0.550    0.000 app.py:121(run_batched_inference)
+        1    0.000    0.000    0.512    0.512 app.py:1(<module>)
+     5000    0.049    0.000    0.384    0.000 create_model.py:16(forward)
+     5000    0.038    0.000    0.118    0.000 profile_harness.py:39(<listcomp>)
+        1    0.000    0.000    0.020    0.020 app.py:241(calculate_median_of_medians)
+       32    0.000    0.000    0.019    0.001 app.py:229(get_user_median)
+       32    0.006    0.000    0.006    0.000 app.py:235(<listcomp>)
+        1    0.000    0.000    0.001    0.001 create_model.py:1(<module>)
+        1    0.000    0.000    0.000    0.000 app.py:89(Feature)
+        1    0.000    0.000    0.000    0.000 app.py:94(EventBatch)
+        1    0.000    0.000    0.000    0.000 app.py:103(Stats)
+        1    0.000    0.000    0.000    0.000 app.py:98(IngestResponse)
+        1    0.000    0.000    0.000    0.000 app.py:114(UserMedianResponse)
+        1    0.000    0.000    0.000    0.000 app.py:19(_fresh_stats)
+        1    0.000    0.000    0.000    0.000 create_model.py:5(InefficientModel)
         1    0.000    0.000    0.000    0.000 profile_harness.py:17(_App)
 ```
 

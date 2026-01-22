@@ -1,6 +1,7 @@
 # create_model.py
 import torch
 import torch.nn as nn
+torch.manual_seed(0)
 class InefficientModel(nn.Module):
 	def __init__(self, in_dim=3):
 		super().__init__()

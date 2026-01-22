@@ -6,7 +6,7 @@ import numpy as np
 from unittest.mock import MagicMock, patch
 
 # Import the functions to test
-from app import update_rolling_median, get_user_median, calculate_median_of_medians, run_inference, run_batched_inference
+from app import update_user_history, get_user_median, calculate_median_of_medians, run_inference, run_batched_inference
 
 
 class TestRollingMedian:
@@ -23,9 +23,9 @@ class TestRollingMedian:
         current_time = int(time.time())
         
         # Add predictions in random order
-        update_rolling_median(app, user_id, current_time - 10, 0.5)
-        update_rolling_median(app, user_id, current_time - 30, 0.3)
-        update_rolling_median(app, user_id, current_time - 20, 0.4)
+        update_user_history(app, user_id, current_time - 10, 0.5)
+        update_user_history(app, user_id, current_time - 30, 0.3)
+        update_user_history(app, user_id, current_time - 20, 0.4)
         
         # Check that data was added and sorted by timestamp
         assert len(app.state.user_data[user_id]) == 3

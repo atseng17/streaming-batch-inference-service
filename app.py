@@ -1,3 +1,14 @@
+"""
+FastAPI ingestion and processing service with an in-memory queue (implemented a "bounded" version after DL) and server-side dynamic micro-batching for inference.
+The app maintains rolling per-user aggregates, stats and backpressure via 429 when overloaded (implemented backpressure after DL).
+Endpoints:
+    - POST /ingest: Ingest a batch of events
+    - GET /users/{user_id}/median: Get the rolling median for a specific user
+    - GET /users/{user_id}/history: Get the full stored history for a specific user (for analytical purposes)
+    - GET /stats: Get service statistics
+"""
+
+
 import asyncio
 import logging
 import time
@@ -16,24 +27,35 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Application state
-app_state = {
-    "user_data": {},  # Dictionary to store user data and rolling medians
-    "stats": {
+def _fresh_stats():
+    return {
         "request_count": 0,
         "inference_count": 0,
         "avg_latency": 0,
         "total_latency": 0,
+        "avg_e2e_latency": 0,
+        "total_e2e_latency": 0,
         "batch_count": 0,
         "avg_batch_size": 0,
         "total_batch_size": 0,
         "median_of_medians": None,
     }
+
+app_state = {
+    "user_data": {},  # Dictionary to store user data, key: str(user_id), value: List[Tuple[timestamp:int, prediction:float]]
+    "stats": _fresh_stats()
 }
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifecycle manager"""
+    """Lifecycle manager
+    1. Loading model, set inference mode
+    2. Creates a container for saving user prediction history and stats (the History is gone after the app shuts down, improvement: redis)
+    3. Creates a in-memory queue for batch processing
+    4. Start batch processor in the background
+    5. gracefully stop background process
+    """
     # Load model during app initalization
     logger.info("Application startup: Loading model...")
     try:
@@ -48,7 +70,7 @@ async def lifespan(app: FastAPI):
 
     # TODO: in Next Steps, connect to redis here
 
-    app.state.batch_queue = asyncio.Queue()
+    app.state.batch_queue = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
 
     # Start the batch processor
     app.state.batch_processor_task = asyncio.create_task(batch_processor(app))
@@ -70,7 +92,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="ML Prediction Service", lifespan=lifespan)
 
 # Batch processing variables
-batch_size = 32  # Maximum batch size for inference
+BATCH_SIZE = 32  # Maximum batch size for inference
+MAX_QUEUE_SIZE = 10_000
+# MAX_QUEUE_SIZE = 10
 
 # Define data models
 class Feature(BaseModel):
@@ -81,40 +105,28 @@ class Feature(BaseModel):
 class EventBatch(BaseModel):
     events: List[Feature]
 
-class Prediction(BaseModel):
-    user_id: str
-    timestamp: int
-    features: List[float]
-    prediction: float
+
+class IngestResponse(BaseModel):
+    queued: int
+
+
 
 class Stats(BaseModel):
     request_count: int
     inference_count: int
     avg_latency: float
+    avg_e2e_latency: float
     batch_count: int
     avg_batch_size: float
+    queue_size: int
     median_of_medians: Optional[float] = None
 
-# Function to run inference on a single sample
-def run_inference(request: Request, features):
-    model = request.app.state.model
-    stats = request.app.state.stats
-    
-    # Convert features to tensor
-    tensor_features = torch.tensor([features], dtype=torch.float32)
-    
-    # Run inference
-    with torch.no_grad():
-        start_time = time.time()
-        prediction = model(tensor_features).item()
-        inference_time = time.time() - start_time
-        
-        # Update stats
-        stats["inference_count"] += 1
-        stats["total_latency"] += inference_time
-        stats["avg_latency"] = stats["total_latency"] / stats["inference_count"]
-            
-    return prediction
+
+class UserMedianResponse(BaseModel):
+    user_id: str
+    median: float
+
+
 
 # Function to run batched inference
 async def run_batched_inference(app, batch_features):
@@ -146,6 +158,11 @@ async def run_batched_inference(app, batch_features):
 
 # Batch processor task (opportunistic batching)
 async def batch_processor(app):
+    """Batch processor task
+    - Opportunistically collect events from the queue (filled by ingest endpoint)
+    - run batched inference
+    - update user data, and stats
+    """
     batch_queue = app.state.batch_queue
     while True:
         # Collect items for the batch
@@ -153,19 +170,19 @@ async def batch_processor(app):
         batch_features = []
         
         try:
-            # Get the first item
+            # If the queue is empty, waits for items to be added
             item = await batch_queue.get()
             batch_items.append(item)
             batch_features.append(item["features"])
-            batch_queue.task_done()
+            # batch_queue.task_done()
             
             # Try to get more items up to batch_size
-            for _ in range(batch_size - 1):
+            for _ in range(BATCH_SIZE - 1):
                 try:
                     item = batch_queue.get_nowait()
                     batch_items.append(item)
                     batch_features.append(item["features"])
-                    batch_queue.task_done()
+                    # batch_queue.task_done()
                 except asyncio.QueueEmpty:
                     break
             
@@ -174,18 +191,34 @@ async def batch_processor(app):
                 # Run inference
                 # logger.info("batch size: %d", len(batch_features))
                 predictions = await run_batched_inference(app, batch_features)
+
+                end_time = time.time()
+                stats = app.state.stats
+                total_batch_e2e = 0.0
+                for item in batch_items:
+                    enqueued_at = item.get("enqueued_at")
+                    if enqueued_at is not None:
+                        total_batch_e2e += (end_time - enqueued_at)
+                stats["total_e2e_latency"] += total_batch_e2e
+                if stats["inference_count"] > 0:
+                    stats["avg_e2e_latency"] = stats["total_e2e_latency"] / stats["inference_count"]
                 
-                # Update rolling medians
+                # Update user data
                 for i, item in enumerate(batch_items):
-                    update_rolling_median(app, item["user_id"], item["timestamp"], predictions[i])
-            # logger.info(f"user data: {app.state.user_data}")
-            # logger.info(f"stats: {app.state.stats}")
+                    update_user_history(app, item["user_id"], item["timestamp"], predictions[i])
+
         except Exception as e:
             logger.exception("Error in batch processing")
             await asyncio.sleep(0.1)  # Avoid tight loop in case of errors
 
 # Function to update rolling median with support for out-of-order events, might need another look, to see if out-of-order events are only subjected to calculating medians
-def update_rolling_median(app, user_id, timestamp, prediction):
+def update_user_history(app, user_id, timestamp, prediction):
+    """
+    Update rolling median for a user
+    - Add new prediction with timestamp,
+    - Sort by timestamp to handle out-of-order events
+    - Remove predictions older than 5 minutes
+    """
     user_data = app.state.user_data
     current_time = int(time.time())
     five_min_ago = current_time - 300  # 5 minutes = 300 seconds
@@ -221,7 +254,7 @@ def calculate_median_of_medians(app):
     stats = app.state.stats
     # Get all user medians
     medians = []
-    for user_id in user_data:
+    for user_id in list(user_data):
         user_median = get_user_median(app, user_id)
         if user_median is not None:
             medians.append(user_median)
@@ -232,26 +265,44 @@ def calculate_median_of_medians(app):
     return None
 
 # API endpoints
-@app.post("/ingest")
+@app.post("/ingest", response_model=IngestResponse, status_code=202)
 async def ingest_events(request: Request, event_batch: EventBatch, background_tasks: BackgroundTasks):
+    """
+    Two tasks:
+    1. Enqueue events batches and dynamically from micro batches.
+    2. Performs server-side backpressure via a bounded queue.
+    3. Recompute on median of medians on every ingest request in the background, 
+       this excludes the newly ingested events that are still sitting in the queue
+    """
     stats = request.app.state.stats
     stats["request_count"] += 1
+
+    batch_queue = request.app.state.batch_queue
+    if batch_queue.maxsize > 0:
+        remaining_capacity = batch_queue.maxsize - batch_queue.qsize()
+        if len(event_batch.events) > remaining_capacity:
+            raise HTTPException(status_code=429, detail="Queue is full")
     
     # Add events to the batch queue
     for event in event_batch.events:
-        await request.app.state.batch_queue.put({
+        await batch_queue.put({
             "user_id": event.user_id,
             "timestamp": event.timestamp,
             "features": event.features
+            ,"enqueued_at": time.time()
         })
     
     # Recompute on every ingest request
+    # TODO: move this to the batch processor, right after processing the batch, so the metric reflects the latest processed, also better if high rps
     background_tasks.add_task(calculate_median_of_medians, request.app)
     
-    return {"queued": len(event_batch.events)}
+    return IngestResponse(queued=len(event_batch.events))
 
-@app.get("/users/{user_id}/median")
-async def get_median(request: Request, user_id: str):
+@app.get("/users/{user_id}/median", response_model=UserMedianResponse)
+async def get_median(user_id: str, request: Request):
+    """
+    Retrieve the user predictions from in-memory storage for a user and calculate the median
+    """
     stats = request.app.state.stats
     stats["request_count"] += 1
     
@@ -260,21 +311,71 @@ async def get_median(request: Request, user_id: str):
     if median is None:
         raise HTTPException(status_code=404, detail=f"No data found for user {user_id}")
     
-    return {"user_id": user_id, "median": median}
+    return UserMedianResponse(user_id=user_id, median=median)
+
+@app.get("/users/{user_id}/history")
+async def get_history(user_id: str, request: Request):
+    """
+    Get the user predictions from in-memory storage for a user within the last 5 minutes
+    """
+    stats = request.app.state.stats
+    stats["request_count"] += 1
+
+    user_data = request.app.state.user_data
+    if user_id not in user_data or not user_data[user_id]:
+        raise HTTPException(status_code=404, detail=f"No data found for user {user_id}")
+
+    history = [
+        {"timestamp": ts, "prediction": pred}
+        for ts, pred in user_data[user_id]
+    ]
+
+    return {"user_id": user_id, "history": history}
 
 @app.get("/stats")
 async def get_stats(request: Request):
+    """
+    Get the current stats from in-memory storage
+    """
     stats = request.app.state.stats
     stats["request_count"] += 1
+
+    queue_size = 0
+    if hasattr(request.app.state, "batch_queue"):
+        queue_size = request.app.state.batch_queue.qsize()
     
     return Stats(
-        request_count=stats["request_count"], # is this needed?
-        inference_count=stats["inference_count"], # is this needed?
-        avg_latency=stats["avg_latency"], # is this needed?
-        batch_count=stats["batch_count"], # is this needed?
-        avg_batch_size=stats["avg_batch_size"], # is this needed?
+        request_count=stats["request_count"],
+        inference_count=stats["inference_count"],
+        avg_latency=stats["avg_latency"], 
+        avg_e2e_latency=stats["avg_e2e_latency"],
+        batch_count=stats["batch_count"],
+        avg_batch_size=stats["avg_batch_size"],
+        queue_size=queue_size,
         median_of_medians=stats["median_of_medians"] # stretch goal
     )
+
+
+@app.post("/reset")
+async def reset_state(request: Request):
+    """
+    Reset the in-memory storage
+    """
+    request.app.state.user_data.clear()
+
+    stats = request.app.state.stats
+    stats.clear()
+    stats.update(_fresh_stats())
+
+    if hasattr(request.app.state, "batch_queue"):
+        while True:
+            try:
+                request.app.state.batch_queue.get_nowait()
+                request.app.state.batch_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+
+    return {"status": "ok"}
 
 
 # Main function
